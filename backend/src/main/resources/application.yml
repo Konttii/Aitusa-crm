@@ -1,0 +1,53 @@
+server:
+  port: ${SERVER_PORT:8080}
+  forward-headers-strategy: framework
+
+spring:
+  application:
+    name: aitusa-crm
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:aitusa_crm}
+    username: ${POSTGRES_USER:aitusa}
+    password: ${POSTGRES_PASSWORD:aitusa_secret}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 500ms
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+app:
+  environment: ${ENVIRONMENT:local}
+  demo-mode: ${DEMO_MODE:true}
+  bot-token: ${BOT_TOKEN:}
+  admin-ids: ${ADMIN_IDS:100000001}
+  init-data-ttl: ${INIT_DATA_TTL:3600}
+  cache-prefix: ${CACHE_PREFIX:aitusa}
+  auth-cache-ttl: ${AUTH_CACHE_TTL:600}
+  crm-cache-ttl: ${CRM_CACHE_TTL:300}
+  web-dist-dir: ${WEB_DIST_DIR:/app/web}
