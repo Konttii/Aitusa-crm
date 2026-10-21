@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:aitusa_crm_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+  flyway:
+    enabled: false
+
+app:
+  environment: test
+  demo-mode: true
+  bot-token: test_bot_token_123456
+  admin-ids: 100000001
+  init-data-ttl: 3600
+  cache-prefix: aitusa_test
