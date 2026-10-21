@@ -1,6 +1,8 @@
 package kz.aitusa.crm.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.persistence.criteria.Predicate;
+import kz.aitusa.crm.config.AppProperties;
 import kz.aitusa.crm.dto.CommitteeResponse;
 import kz.aitusa.crm.dto.PaginatedTasksResponse;
 import kz.aitusa.crm.dto.TaskCreateRequest;
@@ -44,6 +46,8 @@ import java.util.stream.Collectors;
 public class TaskService {
 
     private final AccessService accessService;
+    private final RedisCacheService cacheService;
+    private final AppProperties properties;
     private final TaskRepository taskRepository;
     private final CommitteeRepository committeeRepository;
     private final ParticipantRepository participantRepository;
@@ -51,31 +55,47 @@ public class TaskService {
 
     @Transactional(readOnly = true)
     public UserProfileResponse profile(ActorContext actor) {
-        List<Integer> managedIds = accessService.managedCommitteeIds(actor);
-        Map<Integer, Committee> committeesById = committeeRepository.findAll().stream()
-                .collect(Collectors.toMap(Committee::getId, Function.identity()));
-        UserProfileResponse base = toUserView(
-                actor.user(),
-                actor.membership(),
-                List.copyOf(actor.roles()),
-                committeesById
+        String cacheKey = "tasks:me:" + actor.telegramId();
+        return cacheService.getOrCompute(
+                cacheKey,
+                new TypeReference<>() {},
+                properties.getCrmCacheTtl(),
+                () -> {
+                    List<Integer> managedIds = accessService.managedCommitteeIds(actor);
+                    Map<Integer, Committee> committeesById = committeeRepository.findAll().stream()
+                            .collect(Collectors.toMap(Committee::getId, Function.identity()));
+                    UserProfileResponse base = toUserView(
+                            actor.user(),
+                            actor.membership(),
+                            List.copyOf(actor.roles()),
+                            committeesById
+                    );
+                    base.setManagedCommitteeIds(managedIds);
+                    base.setCanCreateTask(actor.hasFullAccess() || !managedIds.isEmpty());
+                    base.setCanManageAllTasks(actor.hasFullAccess());
+                    base.setCanDeleteTasks(actor.hasGlobalRole());
+                    return base;
+                }
         );
-        base.setManagedCommitteeIds(managedIds);
-        base.setCanCreateTask(actor.hasFullAccess() || !managedIds.isEmpty());
-        base.setCanManageAllTasks(actor.hasFullAccess());
-        base.setCanDeleteTasks(actor.hasGlobalRole());
-        return base;
     }
 
     @Transactional(readOnly = true)
     public List<CommitteeResponse> committees(ActorContext actor) {
-        List<Integer> managedIds = accessService.managedCommitteeIds(actor);
-        if (managedIds.isEmpty()) {
-            return List.of();
-        }
-        return committeeRepository.findByActiveTrueAndIdInOrderByNameAsc(managedIds).stream()
-                .map(c -> CommitteeResponse.builder().id(c.getId()).name(c.getName()).build())
-                .toList();
+        String cacheKey = "tasks:committees:user:" + actor.telegramId();
+        return cacheService.getOrCompute(
+                cacheKey,
+                new TypeReference<>() {},
+                properties.getCrmCacheTtl(),
+                () -> {
+                    List<Integer> managedIds = accessService.managedCommitteeIds(actor);
+                    if (managedIds.isEmpty()) {
+                        return List.of();
+                    }
+                    return committeeRepository.findByActiveTrueAndIdInOrderByNameAsc(managedIds).stream()
+                            .map(c -> CommitteeResponse.builder().id(c.getId()).name(c.getName()).build())
+                            .toList();
+                }
+        );
     }
 
     @Transactional
@@ -122,11 +142,34 @@ public class TaskService {
                 .build();
 
         Task saved = taskRepository.saveAndFlush(task);
+        cacheService.invalidateTasksCache(saved.getCommitteeId(), List.of(actor.telegramId()));
         return TaskResponse.fromEntity(saved);
     }
 
     @Transactional(readOnly = true)
     public PaginatedTasksResponse listing(
+            ActorContext actor,
+            int page,
+            int size,
+            TaskStatus status,
+            UUID assignedTo,
+            Boolean unassigned
+    ) {
+        String cid = actor.membership() != null ? String.valueOf(actor.membership().getCommitteeId()) : "none";
+        String cacheKey = String.format(
+                "tasks:list:u:%d:c:%s:p:%d:s:%d:st:%s:a:%s:un:%s",
+                actor.telegramId(), cid, page, size, status, assignedTo, unassigned
+        );
+
+        return cacheService.getOrCompute(
+                cacheKey,
+                new TypeReference<>() {},
+                properties.getCrmCacheTtl(),
+                () -> queryTasks(actor, page, size, status, assignedTo, unassigned)
+        );
+    }
+
+    private PaginatedTasksResponse queryTasks(
             ActorContext actor,
             int page,
             int size,
@@ -226,6 +269,7 @@ public class TaskService {
 
         task.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
         Task saved = taskRepository.saveAndFlush(task);
+        cacheService.invalidateTasksCache(saved.getCommitteeId(), List.of(actor.telegramId()));
         return TaskResponse.fromEntity(saved);
     }
 
@@ -254,6 +298,7 @@ public class TaskService {
         task.setCompletedBy(status == TaskStatus.COMPLETED ? actor.user().getId() : null);
         task.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
         Task saved = taskRepository.saveAndFlush(task);
+        cacheService.invalidateTasksCache(saved.getCommitteeId(), List.of(actor.telegramId()));
         return TaskResponse.fromEntity(saved);
     }
 
@@ -279,6 +324,7 @@ public class TaskService {
         if (task.getAssignedUser() == null && task.getAssignedTo() != null) {
             userRepository.findById(task.getAssignedTo()).ifPresent(task::setAssignedUser);
         }
+        cacheService.invalidateTasksCache(task.getCommitteeId(), List.of(actor.telegramId()));
         return TaskResponse.fromEntity(task);
     }
 
@@ -288,12 +334,35 @@ public class TaskService {
             throw new DomainException(403, "Удаление доступно президенту и вице-президенту");
         }
         Task task = accessibleTask(actor, taskId, true);
+        Integer committeeId = task.getCommitteeId();
         taskRepository.delete(task);
         taskRepository.flush();
+        cacheService.invalidateTasksCache(committeeId, List.of(actor.telegramId()));
     }
 
     @Transactional(readOnly = true)
     public List<UserProfileResponse> subordinates(
+            ActorContext actor,
+            String search,
+            Integer committeeId,
+            boolean includeSelf
+    ) {
+        String cacheKey = String.format(
+                "tasks:subordinates:u:%d:c:%s:q:%s:self:%s",
+                actor.telegramId(),
+                committeeId,
+                search != null ? search : "",
+                includeSelf
+        );
+        return cacheService.getOrCompute(
+                cacheKey,
+                new TypeReference<>() {},
+                properties.getCrmCacheTtl(),
+                () -> querySubordinates(actor, search, committeeId, includeSelf)
+        );
+    }
+
+    private List<UserProfileResponse> querySubordinates(
             ActorContext actor,
             String search,
             Integer committeeId,
